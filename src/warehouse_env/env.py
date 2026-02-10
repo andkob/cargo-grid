@@ -1,0 +1,284 @@
+from __future__ import annotations
+from typing import Any, Dict, Tuple
+from .config import EnvConfig
+from .state import EnvState, Package
+from .utils import RNG
+from .render import render_ansi
+
+# Actions represented as integers:
+# 0: up, 1: down, 2: left, 3: right, 4: pickup, 5: deliver
+Action = int
+
+# Observations are returned as a dictionary with mixed value types.
+Obs = Dict[str, Any]
+
+class WarehouseEnv:
+    """
+    A simple grid based warehouse environment.
+
+    The agent moves on a 2D grid, can pick up a package when standing on it,
+    and can deliver a carried package when standing on the goal cell.
+
+    Public API
+    reset(seed) -> initial observation
+    step(action) -> (observation, reward, done, info)
+    render() -> human readable string
+    """
+
+    def __init__(self, config: EnvConfig | None = None):
+        """
+        Create a new environment instance.
+
+        Parameters
+        config:
+            Optional environment configuration. If None, uses EnvConfig()
+            with its default values.
+
+        Notes
+        This does not start an episode. Call reset() before step().
+        """
+        self.cfg = config or EnvConfig()
+        self._rng = RNG.from_seed(0)
+
+        # No episode is active until reset() sets an EnvState
+        self._state: EnvState | None = None
+
+        # Goal is the bottom right cell of the grid
+        self.goal_pos = (self.cfg.width - 1, self.cfg.height - 1)
+
+    def reset(self, seed: int | None = None) -> Obs:
+        """
+        Start a new episode and return the initial observation.
+
+        Parameters
+        seed:
+            Seed for deterministic randomness. Same seed produces the same
+            initial package placement and any later random choices.
+
+        Returns
+        Obs:
+            The initial observation dictionary.
+        """
+        # Reset RNG so the episode is reproducible from this seed
+        self._rng = RNG.from_seed(seed)
+
+        # Agent always starts in the top left cell
+        agent_pos = (0, 0)
+
+        # Spawn packages at random valid locations
+        packages = []
+        for _ in range(self.cfg.num_packages):
+            packages.append(Package(pos=self._spawn_package_pos(agent_pos)))
+
+        # Create a fresh episode state
+        self._state = EnvState(
+            step_count=0,
+            agent_pos=agent_pos,
+            carrying=False,
+            battery=self.cfg.battery_capacity,
+            packages=packages,
+        )
+
+        # Return the observation for the starting state
+        return self._obs(self._state)
+
+    def step(self, action: Action) -> Tuple[Obs, float, bool, Dict[str, Any]]:
+        """
+        Apply an action and advance the simulation by one step.
+
+        Actions
+        0: move up
+        1: move down
+        2: move left
+        3: move right
+        4: pick up a package (if standing on one and not already carrying)
+        5: deliver a package (if carrying and standing on the goal)
+
+        Parameters
+        action:
+            The chosen action as an integer.
+
+        Returns
+        observation:
+            Observation after the step.
+        reward:
+            Step reward as a float.
+        done:
+            Whether the episode has terminated.
+        info:
+            Extra debug information such as events and done reason.
+        """
+        if self._state is None:
+            raise RuntimeError("Call reset() before step().")
+
+        s = self._state
+        info: Dict[str, Any] = {"event": None}
+
+        # Start with the per step penalty
+        reward = 0.0
+        reward += self.cfg.penalty_step
+
+        bumped = False
+        delivered_now = False
+
+        # Movement actions
+        if action in (0, 1, 2, 3):
+            # Compute the attempted next cell.
+            nx, ny = self._move_target(s.agent_pos, action)
+
+            # Apply movement only if still inside grid bounds
+            if self._in_bounds(nx, ny):
+                s.agent_pos = (nx, ny)
+            else:
+                # Out of bounds means agent stays in place
+                bumped = True
+        
+        # Pickup action
+        elif action == 4:
+            # Can only pick up if not already carrying and standing on a package
+            if (not s.carrying) and self._package_at_agent(s):
+                s.carrying = True
+                info["event"] = "pickup"
+            else:
+                info["event"] = "pickup_failed"
+        
+        # Deliver action.
+        elif action == 5:
+            # Deliver succeeds only at the goal while carrying.
+            if s.carrying and (s.agent_pos == self.goal_pos):
+                delivered_now = True
+                s.carrying = False
+
+                # Mark one undelivered package as delivered.
+                # This environment treats carrying as a boolean rather than tracking
+                # which specific package is held.
+                self._mark_one_package_delivered(s)
+
+                info["event"] = "deliver"
+            else:
+                info["event"] = "drop_failed"
+        else:
+            raise ValueError(f"Invalid action: {action}")
+
+        # Apply bump penalty and annotate event
+        if bumped:
+            reward += self.cfg.penalty_bump
+            info["event"] = "bump"
+
+        # Apply delivery reward
+        if delivered_now:
+            reward += self.cfg.reward_deliver
+
+        # Update time and resources each step
+        s.step_count += 1
+        s.battery = max(s.battery - 1, 0)
+
+        # Termination checks
+        done = False
+        if s.step_count >= self.cfg.max_steps:
+            done = True
+            info["done_reason"] = "max_steps"
+        elif s.battery == 0:
+            done = True
+            info["done_reason"] = "battery_empty"
+        elif self._all_delivered(s):
+            done = True
+            info["done_reason"] = "all_delivered"
+
+        # Store updated state and return the step tuple
+        self._state = s
+        return self._obs(s), float(reward), bool(done), info
+
+    def render(self) -> str:
+        """
+        Render the current episode state as an ANSI friendly string.
+
+        Returns an empty string if the environment has not been reset yet.
+        """
+        if self._state is None:
+            return ""
+        return render_ansi(self._state, self.cfg.width, self.cfg.height, self.goal_pos)
+
+    def _obs(self, s: EnvState) -> Obs:
+        """
+        Convert internal EnvState into an external observation dictionary.
+        """
+        return {
+            "agent_pos": s.agent_pos,
+            "battery": s.battery,
+            "carrying": int(s.carrying),
+            "packages": [(p.pos, int(p.delivered)) for p in s.packages],
+            "goal_pos": self.goal_pos,
+            "step_count": s.step_count,
+        }
+
+    def _spawn_package_pos(self, agent_pos: tuple[int, int]) -> tuple[int, int]:
+        """
+        Choose a random spawn position for a package.
+
+        The position will never equal the agent start position or the goal cell.
+        """
+        ax, ay = agent_pos
+        gx, gy = self.goal_pos
+
+        # Build the set of valid grid cells
+        candidates = []
+        for y in range(self.cfg.height):
+            for x in range(self.cfg.width):
+                # Don't allow the agent start cell or goal cell
+                if (x, y) == (ax, ay):
+                    continue
+                if (x, y) == (gx, gy):
+                    continue
+                candidates.append((x, y))
+
+        # Pick uniformly from valid candidates
+        return self._rng.choice(candidates)
+
+    def _move_target(self, pos: tuple[int, int], action: int) -> tuple[int, int]:
+        """
+        Compute the attempted next position for a movement action.
+        """
+        x, y = pos
+        if action == 0:   # up
+            return (x, y - 1)
+        if action == 1:   # down
+            return (x, y + 1)
+        if action == 2:   # left
+            return (x - 1, y)
+        return (x + 1, y) # right (action == 3)
+
+    def _in_bounds(self, x: int, y: int) -> bool:
+        """
+        Return True if (x, y) lies within the grid.
+        """
+        return 0 <= x < self.cfg.width and 0 <= y < self.cfg.height
+
+    def _package_at_agent(self, s: EnvState) -> bool:
+        """
+        Return True if the agent is standing on an undelivered package.
+        """
+        for p in s.packages:
+            if (not p.delivered) and (p.pos == s.agent_pos):
+                return True
+        return False
+
+    def _mark_one_package_delivered(self, s: EnvState) -> None:
+        """
+        Mark the first undelivered package as delivered.
+
+        This is used after a successful delivery action.
+        """
+        for p in s.packages:
+            if not p.delivered:
+                p.delivered = True
+                return
+
+    def _all_delivered(self, s: EnvState) -> bool:
+        """
+        Return True if all packages in the episode have been delivered.
+        """
+        for p in s.packages:
+            if not p.delivered:
+                return False
+        return True
