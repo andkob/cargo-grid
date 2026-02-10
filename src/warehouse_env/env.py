@@ -135,8 +135,10 @@ class WarehouseEnv:
             # Apply movement only if still inside grid bounds
             if self._can_enter(nx, ny, s.walls):
                 s.agent_pos = (nx, ny)
+                info["event"] = "move"
             else:
-                # Out of bounds means agent stays in place
+                # Bump means agent stays in place
+                info["event"] = "bump_wall" if (nx, ny) in s.walls else "bump_out_of_bounds"
                 bumped = True
         
         # Pickup action
