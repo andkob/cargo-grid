@@ -44,7 +44,7 @@ def render_ansi(state: EnvState, width: int, height: int, goal: tuple[int, int])
     grid[ay][ax] = "A"
 
     lines = []
-    lines.append(f"step={state.step_count} battery={state.battery} carrying={int(state.carrying)}")
+    lines.append(f"step={state.step_count} battery={state.battery} carrying={state.carrying_id}")
     for row in grid:
         lines.append("".join(row))
     return "\n".join(lines)

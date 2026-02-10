@@ -70,14 +70,14 @@ class WarehouseEnv:
 
         # Spawn packages at random valid locations
         packages = []
-        for _ in range(self.cfg.num_packages):
-            packages.append(Package(pos=self._spawn_package_pos(agent_pos)))
+        for i in range(self.cfg.num_packages):
+            packages.append(Package(id=i, pos=self._spawn_package_pos(agent_pos, walls)))
 
         # Create a fresh episode state
         self._state = EnvState(
             step_count=0,
             agent_pos=agent_pos,
-            carrying=False,
+            carrying_id=None,
             battery=self.cfg.battery_capacity,
             packages=packages,
             walls=walls,
@@ -140,27 +140,34 @@ class WarehouseEnv:
         # Pickup action
         elif action == 4:
             # Can only pick up if not already carrying and standing on a package
-            if (not s.carrying) and self._package_at_agent(s):
-                s.carrying = True
-                info["event"] = "pickup"
+            if (s.is_carrying):
+                info["event"] = "pickup_failed_already_carrying"
             else:
-                info["event"] = "pickup_failed"
+                pid = self._package_id_at_agent(s)
+                if pid is None:
+                    info["event"] = "pickup_failed_no_package"
+                else:
+                    s.carrying_id = pid
+                    info["event"] = "pickup"
         
         # Deliver action.
         elif action == 5:
             # Deliver succeeds only at the goal while carrying.
-            if s.carrying and (s.agent_pos == self.goal_pos):
-                delivered_now = True
-                s.carrying = False
-
-                # Mark one undelivered package as delivered.
-                # This environment treats carrying as a boolean rather than tracking
-                # which specific package is held.
-                self._mark_one_package_delivered(s)
-
-                info["event"] = "deliver"
+            if not s.is_carrying:
+                info["event"] = "drop_failed_not_carrying"
+            elif s.agent_pos != self.goal_pos:
+                info["event"] = "drop_failed_not_at_goal"
             else:
-                info["event"] = "drop_failed"
+                # should never happen, but being safe
+                if s.carrying_id is None:
+                    raise RuntimeError("Inconsistent state: carrying_id is None but is_carrying is True")
+                
+                # Mark package as delivered.
+                self._mark_package_delivered(s, s.carrying_id)
+                
+                s.carrying_id = None
+                delivered_now = True
+                info["event"] = "deliver"
         else:
             raise ValueError(f"Invalid action: {action}")
 
@@ -210,7 +217,7 @@ class WarehouseEnv:
         return {
             "agent_pos": s.agent_pos,
             "battery": s.battery,
-            "carrying": int(s.carrying),
+            "carrying": s.carrying_id,
             "packages": [(p.pos, int(p.delivered)) for p in s.packages],
             "goal_pos": self.goal_pos,
             "walls": sorted(list(s.walls)),
@@ -265,12 +272,15 @@ class WarehouseEnv:
         candidates = []
         for y in range(self.cfg.height):
             for x in range(self.cfg.width):
-                # Don't allow the agent start cell or goal cell
-                if (x, y) == (ax, ay):
+                # Don't allow the agent start cell, goal cell, or wall cells
+                pos = (x, y)
+                if pos == (ax, ay):
                     continue
-                if (x, y) == (gx, gy):
+                if pos == (gx, gy):
                     continue
-                candidates.append((x, y))
+                if pos in walls:
+                    continue
+                candidates.append(pos)
 
         # Pick uniformly from valid candidates
         return self._rng.choice(candidates)
@@ -294,25 +304,26 @@ class WarehouseEnv:
         """
         return 0 <= x < self.cfg.width and 0 <= y < self.cfg.height and (x, y) not in walls
 
-    def _package_at_agent(self, s: EnvState) -> bool:
+    def _package_id_at_agent(self, s: EnvState) -> int | None:
         """
-        Return True if the agent is standing on an undelivered package.
+        Return Package id if the agent is standing on an undelivered package.
         """
         for p in s.packages:
             if (not p.delivered) and (p.pos == s.agent_pos):
-                return True
-        return False
+                return p.id
+        return None
 
-    def _mark_one_package_delivered(self, s: EnvState) -> None:
+    def _mark_package_delivered(self, s: EnvState, pid: int) -> None:
         """
         Mark the first undelivered package as delivered.
 
         This is used after a successful delivery action.
         """
         for p in s.packages:
-            if not p.delivered:
+            if p.id == pid:
                 p.delivered = True
                 return
+        raise RuntimeError("Carrying package id not found in state")
 
     def _all_delivered(self, s: EnvState) -> bool:
         """

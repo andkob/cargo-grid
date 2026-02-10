@@ -6,6 +6,7 @@ Pos = Tuple[int, int]
 
 @dataclass
 class Package:
+    id: int
     pos: Pos
     delivered: bool = False
 
@@ -13,7 +14,11 @@ class Package:
 class EnvState:
     step_count: int
     agent_pos: Pos
-    carrying: bool
+    carrying_id: int | None
     battery: int
     packages: List[Package]
     walls: set[Pos]
+
+    @property
+    def is_carrying(self) -> bool:
+        return self.carrying_id is not None
