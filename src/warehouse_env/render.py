@@ -7,7 +7,7 @@ def render_ansi(state: EnvState, width: int, height: int, goal: tuple[int, int])
 
     Symbols
     A agent position
-    P undelivered package
+    $ undelivered package
     G goal cell
     # wall cell
     . empty cell
@@ -32,15 +32,20 @@ def render_ansi(state: EnvState, width: int, height: int, goal: tuple[int, int])
 
     grid = [["." for _ in range(width)] for _ in range(height)]
 
+    # walls
     for (wx, wy) in state.walls:
         grid[wy][wx] = "#"
 
+    # packages (undelivered)
     for p in state.packages:
         if not p.delivered:
             px, py = p.pos
-            grid[py][px] = "P"
+            grid[py][px] = "$"
 
+    # goal
     grid[gy][gx] = "G"
+
+    # agent (overrides any other symbol)
     grid[ay][ax] = "A"
 
     lines = []

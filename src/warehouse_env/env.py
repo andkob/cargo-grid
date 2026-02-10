@@ -96,7 +96,7 @@ class WarehouseEnv:
         2: move left
         3: move right
         4: pick up a package (if standing on one and not already carrying)
-        5: deliver a package (if carrying and standing on the goal)
+        5: drop a package (deliver if at goal while carrying)
 
         Parameters
         action:
@@ -123,6 +123,8 @@ class WarehouseEnv:
         reward += self.cfg.penalty_step
 
         bumped = False
+        dropped_wrong = False
+        picked_up = False
         delivered_now = False
 
         # Movement actions
@@ -148,26 +150,33 @@ class WarehouseEnv:
                     info["event"] = "pickup_failed_no_package"
                 else:
                     s.carrying_id = pid
+                    # Invariant enforcement: attach immediately
+                    self._set_package_pos(s, pid, s.agent_pos)
+                    picked_up = True
                     info["event"] = "pickup"
         
-        # Deliver action.
+        # Drop action.
         elif action == 5:
-            # Deliver succeeds only at the goal while carrying.
+            # Drop anywhere. If at goal while carrying, counts as delivery
             if not s.is_carrying:
                 info["event"] = "drop_failed_not_carrying"
-            elif s.agent_pos != self.goal_pos:
-                info["event"] = "drop_failed_not_at_goal"
             else:
                 # should never happen, but being safe
                 if s.carrying_id is None:
                     raise RuntimeError("Inconsistent state: carrying_id is None but is_carrying is True")
                 
-                # Mark package as delivered.
-                self._mark_package_delivered(s, s.carrying_id)
-                
-                s.carrying_id = None
-                delivered_now = True
-                info["event"] = "deliver"
+                pid = s.carrying_id
+                self._set_package_pos(s, pid, s.agent_pos)
+
+                if s.agent_pos == self.goal_pos:
+                    self._mark_package_delivered(s, pid)
+                    s.carrying_id = None
+                    delivered_now = True
+                    info["event"] = "deliver"
+                else:
+                    s.carrying_id = None
+                    dropped_wrong = True
+                    info["event"] = "drop"
         else:
             raise ValueError(f"Invalid action: {action}")
 
@@ -176,9 +185,24 @@ class WarehouseEnv:
             reward += self.cfg.penalty_bump
             info["event"] = "bump"
 
+        # Apply drop penalty if wrong drop
+        if dropped_wrong:
+            reward += self.cfg.penalty_drop_wrong
+
+        # Apply pickup reward
+        if picked_up:
+            reward += self.cfg.reward_pickup
+
         # Apply delivery reward
         if delivered_now:
             reward += self.cfg.reward_deliver
+
+        # Keep carried package attached to the agent
+        if s.is_carrying:
+            # should never happen, but being safe
+            if s.carrying_id is None:
+                raise RuntimeError("Inconsistent state: carrying_id is None but is_carrying is True")
+            self._set_package_pos(s, s.carrying_id, s.agent_pos)
 
         # Update time and resources each step
         s.step_count += 1
@@ -312,6 +336,19 @@ class WarehouseEnv:
             if (not p.delivered) and (p.pos == s.agent_pos):
                 return p.id
         return None
+
+    def _set_package_pos(self, s: EnvState, pid: int, new_pos: tuple[int, int]) -> None:
+        """
+        Move the package with the given id to a new position.
+
+        This is used after a successful pickup action to move the package with
+        the agent.
+        """
+        for p in s.packages:
+            if p.id == pid:
+                p.pos = new_pos
+                return
+        raise RuntimeError("Carrying package id not found in state")
 
     def _mark_package_delivered(self, s: EnvState, pid: int) -> None:
         """
