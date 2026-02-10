@@ -65,6 +65,9 @@ class WarehouseEnv:
         # Agent always starts in the top left cell
         agent_pos = (0, 0)
 
+        # Spawn walls at random valid locations
+        walls = self._spawn_walls(agent_pos)
+
         # Spawn packages at random valid locations
         packages = []
         for _ in range(self.cfg.num_packages):
@@ -77,6 +80,7 @@ class WarehouseEnv:
             carrying=False,
             battery=self.cfg.battery_capacity,
             packages=packages,
+            walls=walls,
         )
 
         # Return the observation for the starting state
@@ -127,7 +131,7 @@ class WarehouseEnv:
             nx, ny = self._move_target(s.agent_pos, action)
 
             # Apply movement only if still inside grid bounds
-            if self._in_bounds(nx, ny):
+            if self._can_enter(nx, ny, s.walls):
                 s.agent_pos = (nx, ny)
             else:
                 # Out of bounds means agent stays in place
@@ -209,10 +213,46 @@ class WarehouseEnv:
             "carrying": int(s.carrying),
             "packages": [(p.pos, int(p.delivered)) for p in s.packages],
             "goal_pos": self.goal_pos,
+            "walls": sorted(list(s.walls)),
             "step_count": s.step_count,
         }
+    
+    def _spawn_walls(self, agent_pos: tuple[int, int]) -> set[tuple[int, int]]:
+        """
+        Randomly generate wall positions on the grid.
 
-    def _spawn_package_pos(self, agent_pos: tuple[int, int]) -> tuple[int, int]:
+        Walls will never be placed on the agent start position or the goal cell.
+        The number of walls is determined by wall_fraction of available cells.
+        """
+        ax, ay = agent_pos
+        gx, gy = self.goal_pos
+
+        # Build the set of valid grid cells
+        candidates: list[tuple[int, int]] = []
+        for y in range(self.cfg.height):
+            for x in range(self.cfg.width):
+                if (x, y) == (ax, ay):
+                    continue
+                if (x, y) == (gx, gy):
+                    continue
+                candidates.append((x, y))
+
+        # Randomly select a subset of candidates to become walls
+        total = len(candidates)
+        k = int(total * self.cfg.wall_fraction)
+
+        # Pick uniformly from valid candidates
+        walls: set[tuple[int, int]] = set()
+        for _ in range(k):
+            if not candidates:
+                break
+            pos = self._rng.choice(candidates)
+            candidates.remove(pos)
+            walls.add(pos)
+
+        return walls
+
+    def _spawn_package_pos(self, agent_pos: tuple[int, int], walls: set[tuple[int, int]]) -> tuple[int, int]:
         """
         Choose a random spawn position for a package.
 
@@ -248,11 +288,11 @@ class WarehouseEnv:
             return (x - 1, y)
         return (x + 1, y) # right (action == 3)
 
-    def _in_bounds(self, x: int, y: int) -> bool:
+    def _can_enter(self, x: int, y: int, walls: set[tuple[int, int]]) -> bool:
         """
-        Return True if (x, y) lies within the grid.
+        Return True if (x, y) lies within the grid and is not a wall.
         """
-        return 0 <= x < self.cfg.width and 0 <= y < self.cfg.height
+        return 0 <= x < self.cfg.width and 0 <= y < self.cfg.height and (x, y) not in walls
 
     def _package_at_agent(self, s: EnvState) -> bool:
         """

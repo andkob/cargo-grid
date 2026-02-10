@@ -16,3 +16,4 @@ class EnvState:
     carrying: bool
     battery: int
     packages: List[Package]
+    walls: set[Pos]

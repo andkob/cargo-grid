@@ -9,6 +9,7 @@ def render_ansi(state: EnvState, width: int, height: int, goal: tuple[int, int])
     A agent position
     P undelivered package
     G goal cell
+    # wall cell
     . empty cell
 
     The agent symbol overrides all others if occupying the same cell.
@@ -30,6 +31,9 @@ def render_ansi(state: EnvState, width: int, height: int, goal: tuple[int, int])
     gx, gy = goal
 
     grid = [["." for _ in range(width)] for _ in range(height)]
+
+    for (wx, wy) in state.walls:
+        grid[wy][wx] = "#"
 
     for p in state.packages:
         if not p.delivered:
